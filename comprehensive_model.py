@@ -4,7 +4,7 @@
 """
 Python script that simulates assembly of ecological communities.
 
-Jimmy J. Qian and Erol Akçay, 2019. "The balance of interaction types
+Jimmy J. Qian and Erol Akçay, 2020. "The balance of interaction types
 determines the assembly and stability of ecological communities"
 """
 
@@ -31,7 +31,8 @@ class Community(object):
 
     def __init__(self, C, Pc, Pm, h, plotbool=False, plot_failed_eq=False,
                  study_selection=False, relative_eq_criteria=False,
-                 pool_interactions = False, variable_r = False):
+                 IIM_bool = False, variable_r = False, VUM_bool=False,
+                 lamb = 0.5):
         """
         Takes in parameters that are varied across communities.
         Initialize default parameters of the community as attributes.
@@ -45,8 +46,10 @@ class Community(object):
             plot_failed_eq (boolean): whether to plot dynamics at equilibria that do not converge before the time limit
             study_selection (boolean): set True to run the analysis of selection as described for Figure 5, S14-17
             relative_eq_criteria (boolean): set True to use equilibration criteria that is relative to population sizes
-            pool_interactions (boolean): set True to implement the pooled interactions model, otherwise use unique interactions model
+            IIM_bool (boolean): set True to implement the interchangeable interactions model, otherwise use unique interactions model (make sure VUM_bool set to False)
             variable_r (boolean): set True to vary r between -1 and 1 based on the proportion of predatory interactions
+            VUM_bool (boolean): set True to implement the variable uniqueness model (make sure IIM_bool is set to False)
+            lamb (float): uniqueness coefficient (lambda) in the VUM
         """
         # Simulation parameters that are varied across communities. Taken as inputs
         self.C = C
@@ -57,8 +60,10 @@ class Community(object):
         self.plot_failed_eq = plot_failed_eq
         self.study_selection = study_selection
         self.relative_eq_criteria = relative_eq_criteria
-        self.pool_interactions = pool_interactions
+        self.IIM_bool = IIM_bool
         self.variable_r = variable_r
+        self.VUM_bool = VUM_bool
+        self.lamb = lamb
 
         # Additional simulation parameters and variables
         self.S = 10 # number of initial species
@@ -218,7 +223,24 @@ class Community(object):
         Returns the 1 by S matrix of population growth.
         """
         Xnew = X.reshape((-1,1)) # make it into 2D S by 1 matrix
-        if self.pool_interactions: # pooled interactions model
+        if self.VUM_bool: # VUM
+            X_m = Xnew*self.lamb / (self.halfsat + Xnew*self.lamb)
+            m_mask = self.A_m > 0
+            m_mask = m_mask.astype(float)
+            m_sums = np.dot(m_mask, Xnew)
+            pred_mask = self.A_e_pos > 0
+            pred_mask = pred_mask.astype(float)
+            pred_sums = np.dot(pred_mask, Xnew)
+
+            output = Xnew * (self.R + self.selfinteraction * Xnew / self.K + \
+                             np.dot(self.A_c, Xnew) + \
+                             np.dot(self.A_m, Xnew*(1-self.lamb))/(self.halfsat+m_sums*(1-self.lamb)) + \
+                             np.dot(self.A_e_pos, Xnew*(1-self.lamb))/(self.halfsat+pred_sums*(1-self.lamb)) + \
+                             np.dot(self.A_e_neg, Xnew*(1-self.lamb)/(self.halfsat+pred_sums*(1-self.lamb))) +\
+                             np.dot(self.A_m, X_m) + \
+                             np.dot(self.A_e_pos, X_m) + \
+                             np.dot(self.A_e_neg, Xnew*self.lamb)/(self.halfsat + Xnew*self.lamb))
+        elif self.IIM_bool: # IIM
             m_mask = self.A_m > 0
             m_mask = m_mask.astype(float)
             m_sums = np.dot(m_mask, Xnew)
@@ -231,7 +253,7 @@ class Community(object):
                              np.dot(self.A_m, Xnew)/(self.halfsat+m_sums) + \
                              np.dot(self.A_e_pos, Xnew)/(self.halfsat+pred_sums) + \
                              np.dot(self.A_e_neg, Xnew/(self.halfsat+pred_sums)))
-        else: # unique interactions model
+        else: # UIM
             X_m = Xnew / (self.halfsat + Xnew)
             output = Xnew * (self.R + self.selfinteraction * Xnew / self.K + \
                              np.dot(self.A_c, Xnew)+ np.dot(self.A_m, X_m) + \
@@ -388,8 +410,36 @@ class Community(object):
                 else:
                     new_r = self.r
                 xjcol = self.population
-
-                if self.pool_interactions:
+                if self.VUM_bool: # VUM
+                    X_m = xjcol*self.lamb / (self.halfsat + xjcol*self.lamb)
+                    m_mask = newrow_m > 0
+                    m_mask = m_mask.astype(float)
+                    m_sums = np.dot(m_mask, xjcol)
+                    pred_mask = newrow_e_pos > 0
+                    pred_mask = pred_mask.astype(float)
+                    pred_sums = np.dot(pred_mask, xjcol)
+                    exploiter_mask = self.A_e_pos > 0
+                    exploiter_mask = exploiter_mask.astype(float)
+                    exploiter_sums = np.dot(exploiter_mask, xjcol)
+                    # invasion condition
+                    if (new_r + np.dot(newrow_c, xjcol) + \
+                        np.dot(newrow_m, xjcol*(1-self.lamb))/(self.halfsat + m_sums*(1-self.lamb)) + \
+                        np.dot(newrow_e_pos, xjcol*(1-self.lamb))/(self.halfsat + pred_sums*(1-self.lamb)) +\
+                        np.dot(newrow_e_neg, xjcol*(1-self.lamb)/(self.halfsat + exploiter_sums*(1-self.lamb))) +\
+                        np.dot(newrow_m, X_m) +\
+                        np.dot(newrow_e_pos, X_m) + \
+                        np.dot(newrow_e_neg, xjcol)*self.lamb/self.halfsat) > 0:
+                        invasionfailed = False
+                    else:
+                        self.failedinvasiontimes.append(self.currenttime) # track the times of failed invasions
+                        failedcounter += 1
+                        if self.steady == True:
+                            self.failedinvasionsteady += 1
+                        if failedcounter > self.failedinvasionlim:
+                            self.broken = True
+                            print('Uninvadable equilibrium')
+                            return
+                elif self.IIM_bool: # IIM
                     m_mask = newrow_m > 0
                     m_mask = m_mask.astype(float)
                     m_sums = np.dot(m_mask, xjcol)
@@ -414,7 +464,7 @@ class Community(object):
                             self.broken = True
                             print('Uninvadable equilibrium')
                             return
-                else: # unique interactions model
+                else: # UIM
                     X_m = xjcol / (self.halfsat + xjcol)
                     # invasion condition
                     if (new_r + np.dot(newrow_c, xjcol) + np.dot(newrow_m, X_m) + \
@@ -691,11 +741,11 @@ def run_simulation(command_line):
     C=params[1]
     h=params[2]
 
-    simulation = Community(C, Pc, Pm, h, study_selection=True, pool_interactions = True,
-                           variable_r = False)
+    simulation = Community(C, Pc, Pm, h, study_selection=False, IIM_bool = False,
+                           variable_r = False, VUM_bool = False, lamb=0.5)
     simulation.start()
-    simulation.iterate_selection()
-    #simulation.iterate()
+    #simulation.iterate_selection()
+    simulation.iterate()
     #simulation.plot_richness()
     #simulation.plot_dynamics()
 
